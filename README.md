@@ -320,6 +320,8 @@ In the editor, find the `metrics-server` container and set:
 
 Save and exit. Ensure **replicas: 1**. List pods (label can vary; grep by name): `kubectl get pods -n kube-system | grep metrics`. Wait for the single pod to be **Running**; then try `kubectl top nodes` and `kubectl top pod -n backend -l app=reactions`. If the new pod still crashes, check logs: `kubectl logs -n kube-system deployment/metrics-server --tail=50`.
 
+**OrbStack / K3s: "Metrics not available" for pods:** On some OrbStack or K3s clusters, the kubelet’s summary API returns **node** metrics but an **empty list of pod metrics**. Then `kubectl top nodes` works but `kubectl top pods` always shows "Metrics not available" (and HPA cannot scale on CPU). This comes from the runtime (kubelet/CRI) not exposing per-container stats, not from metrics-server. Workarounds: (1) Use **node** metrics only: `kubectl top nodes`. (2) Use another cluster (e.g. Minikube, GKE, EKS) if you need pod metrics and CPU-based HPA. (3) On OrbStack, ensure you’re on a recent version; some versions add better metrics support.
+
 **2. In one terminal, watch the HPA and pods:**
 
 ```bash
