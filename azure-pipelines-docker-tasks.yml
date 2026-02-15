@@ -1,0 +1,311 @@
+# Azure DevOps pipeline: build images, push to Docker Hub, then deploy to EC2 (Docker Compose), K8s (manifests), or K8s (Helm).
+# Agent pool: Default. Image registry: Docker Hub.
+# Set pipeline variables and service connections (see docs/azure-pipelines-setup.md).
+# This version uses built-in Docker@2 buildAndPush tasks instead of bash + buildx.
+
+parameters:
+  - name: deployTarget
+    displayName: 'Deployment target'
+    type: string
+    default: 'ec2-docker-compose'
+    values:
+      - ec2-docker-compose
+      - k8s
+      - k8s-helm
+
+  - name: imageTag
+    displayName: 'Docker image tag (default: build ID)'
+    type: string
+    default: ''
+
+variables:
+  - group: ITGATE
+  - name: DOCKERHUB_IMAGE_PREFIX
+    value: '$(DOCKERHUB_USERNAME)/ashour-chat'
+  - name: TAG
+    value: $[ coalesce(variables['Build.SourceVersion'], variables['Build.BuildId']) ]
+
+trigger:
+  branches:
+    include:
+      - main
+      - master
+  paths:
+    exclude:
+      - '*.md'
+      - 'docs/*'
+
+pool: Default
+
+stages:
+  - stage: Build
+    displayName: 'Build and push to Docker Hub'
+    jobs:
+      - job: SetTag
+        displayName: 'Set image tag'
+        steps:
+          - script: |
+              if [ -z "${{ parameters.imageTag }}" ]; then
+                echo "##vso[task.setvariable variable=effectiveTag;isOutput=true]$(Build.BuildId)"
+              else
+                echo "##vso[task.setvariable variable=effectiveTag;isOutput=true]${{ parameters.imageTag }}"
+              fi
+            displayName: 'Set effectiveTag (param or Build.BuildId)'
+            name: setEffectiveTag
+
+      - job: BuildImages
+        displayName: 'Build and push Docker images'
+        dependsOn: SetTag
+        variables:
+          effectiveTag: $[ dependencies.SetTag.outputs['setEffectiveTag.effectiveTag'] ]
+        steps:
+          - task: Docker@2
+            displayName: 'Build and push frontend'
+            inputs:
+              command: buildAndPush
+              containerRegistry: 'dockerHubConnection'
+              repository: '$(DOCKERHUB_IMAGE_PREFIX)-frontend'
+              dockerfile: 'frontend/Dockerfile'
+              buildContext: 'frontend'
+              tags: |
+                $(effectiveTag)
+                latest
+
+          - task: Docker@2
+            displayName: 'Build and push reactions'
+            inputs:
+              command: buildAndPush
+              containerRegistry: 'dockerHubConnection'
+              repository: '$(DOCKERHUB_IMAGE_PREFIX)-reactions'
+              dockerfile: 'backend/reactions/Dockerfile'
+              buildContext: 'backend/reactions'
+              tags: |
+                $(effectiveTag)
+                latest
+
+          - task: Docker@2
+            displayName: 'Build and push mood'
+            inputs:
+              command: buildAndPush
+              containerRegistry: 'dockerHubConnection'
+              repository: '$(DOCKERHUB_IMAGE_PREFIX)-mood'
+              dockerfile: 'backend/mood/Dockerfile'
+              buildContext: 'backend/mood'
+              tags: |
+                $(effectiveTag)
+                latest
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish image tag for deploy'
+            inputs:
+              targetPath: '$(Build.SourcesDirectory)'
+              artifact: 'image-tag'
+              publishLocation: 'pipeline'
+            condition: succeeded()
+
+  - stage: DeployEC2
+    displayName: 'Deploy to EC2 (Docker Compose)'
+    dependsOn: Build
+    condition: and(succeeded(), eq('${{ parameters.deployTarget }}', 'ec2-docker-compose'))
+    variables:
+
+      effectiveTag: $[ stageDependencies.Build.SetTag.outputs['setEffectiveTag.effectiveTag'] ]
+    jobs:
+      - deployment: DeployToEC2
+        displayName: 'Deploy on EC2 with Docker Compose'
+        environment: 'ec2'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: CopyFilesOverSSH@0
+                  displayName: 'Copy docker-compose and env to EC2'
+                  inputs:
+                    sshEndpoint: 'EC2-SSH'
+                    sourceFolder: '$(Build.SourcesDirectory)'
+                    contents: |
+                      docker-compose.yml
+                      docker-compose.prod.yml
+                    targetFolder: '$(EC2_DEPLOY_PATH)'
+                    cleanTargetFolder: false
+
+                - task: SSH@0
+                  displayName: 'Run Docker Compose on EC2'
+                  inputs:
+                    sshEndpoint: 'EC2-SSH'
+                    runOptions: 'inline'
+                    inlineScript: |
+                      set -e
+                      cd $(EC2_DEPLOY_PATH)
+                      export TAG=$(effectiveTag)
+                      export DOCKERHUB_IMAGE_PREFIX=$(DOCKERHUB_IMAGE_PREFIX)
+                      docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+                      docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+  - stage: DeployK8s
+    displayName: 'Deploy to Kubernetes'
+    dependsOn: Build
+    condition: and(succeeded(), eq('${{ parameters.deployTarget }}', 'k8s'))
+    variables:
+      effectiveTag: $[ stageDependencies.Build.SetTag.outputs['setEffectiveTag.effectiveTag'] ]
+    jobs:
+      - deployment: DeployToK8s
+        displayName: 'Deploy to K8s cluster'
+        environment: 'k8s'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Get repo for manifest replacement'
+                  inputs:
+                    buildType: 'current'
+                    artifactName: 'image-tag'
+                    targetPath: '$(Pipeline.Workspace)'
+
+                - bash: |
+                    set -e
+                    IMG_PREFIX="$(DOCKERHUB_IMAGE_PREFIX)"
+                    TAG="$(effectiveTag)"
+                    echo "Using images: ${IMG_PREFIX}-frontend:${TAG}, ${IMG_PREFIX}-reactions:${TAG}, ${IMG_PREFIX}-mood:${TAG}"
+                    find k8s -name "*.yaml" -type f | while read f; do
+                      sed -i.bak \
+                        -e "s|image: frontend:latest|image: ${IMG_PREFIX}-frontend:${TAG}|g" \
+                        -e "s|image: reactions:latest|image: ${IMG_PREFIX}-reactions:${TAG}|g" \
+                        -e "s|image: mood:latest|image: ${IMG_PREFIX}-mood:${TAG}|g" \
+                        "$f" && rm -f "${f}.bak"
+                    done
+                  displayName: 'Replace image tags in K8s manifests'
+
+                - task: DownloadSecureFile@1
+                  name: download_tls_crt
+                  displayName: 'Download TLS certificate'
+                  inputs:
+                    secureFile: 'tls.crt'
+
+                - task: DownloadSecureFile@1
+                  name: download_tls_key
+                  displayName: 'Download TLS key'
+                  inputs:
+                    secureFile: 'tls.key'
+
+                - bash: |
+                    set -e
+                    K="$(Build.SourcesDirectory)/k8s"
+                    # Namespaces first (README: "Apply manifests in order")
+                    kubectl apply -f "$K/namespace-1-frontend/namespace.yaml"
+                    kubectl apply -f "$K/namespace-2-backend/namespace.yaml"
+                    kubectl apply -f "$K/namespace-3-data/namespace.yaml"
+                    set -e
+                    kubectl create secret tls ingress-tls \
+                      --cert="$(download_tls_crt.secureFilePath)" \
+                      --key="$(download_tls_key.secureFilePath)" \
+                      -n frontend --dry-run=client -o yaml | kubectl apply -f -
+                    kubectl create secret tls ingress-tls \
+                      --cert="$(download_tls_crt.secureFilePath)" \
+                      --key="$(download_tls_key.secureFilePath)" \
+                      -n backend --dry-run=client -o yaml | kubectl apply -f -
+                  displayName: 'Create TLS secret (ingress-tls) in frontend and backend'
+
+                - bash: |
+                    set -e
+                    K="$(Build.SourcesDirectory)/k8s"
+                    # StorageClass: apply only if it does not exist (K8s forbids updates to parameters)
+                    if ! kubectl get storageclass standard-retain --ignore-not-found -o name 2>/dev/null | grep -q .; then
+                      kubectl apply -f "$K/namespace-3-data/storageclass.yaml"
+                    else
+                      echo "StorageClass standard-retain already exists, skipping apply."
+                    fi
+                    # Data layer
+                    kubectl apply -f "$K/namespace-3-data/redis-configmap.yaml"
+                    kubectl apply -f "$K/namespace-3-data/redis-secret.yaml"
+                    kubectl apply -f "$K/namespace-3-data/redis-statefulset.yaml"
+                    kubectl apply -f "$K/namespace-3-data/redis-networkpolicy.yaml"
+                    kubectl apply -f "$K/namespace-3-data/mysql-configmap.yaml"
+                    kubectl apply -f "$K/namespace-3-data/mysql-secret.yaml"
+                    kubectl apply -f "$K/namespace-3-data/mysql-statefulset.yaml"
+                    kubectl apply -f "$K/namespace-3-data/mysql-networkpolicy.yaml"
+                    # Backend layer
+                    kubectl apply -f "$K/namespace-2-backend/reactions-configmap.yaml"
+                    kubectl apply -f "$K/namespace-2-backend/reactions-secret.yaml"
+                    kubectl apply -f "$K/namespace-2-backend/reactions-deployment.yaml"
+                    kubectl apply -f "$K/namespace-2-backend/mood-configmap.yaml"
+                    kubectl apply -f "$K/namespace-2-backend/mood-secret.yaml"
+                    kubectl apply -f "$K/namespace-2-backend/mood-deployment.yaml"
+                    kubectl apply -f "$K/namespace-2-backend/backend-networkpolicy.yaml"
+                    kubectl apply -f "$K/namespace-2-backend/backend-hpa.yaml"
+                    # Frontend layer
+                    kubectl apply -f "$K/namespace-1-frontend/frontend-configmap.yaml"
+                    kubectl apply -f "$K/namespace-1-frontend/frontend-secret.yaml"
+                    kubectl apply -f "$K/namespace-1-frontend/frontend-deployment.yaml"
+                    kubectl apply -f "$K/namespace-1-frontend/frontend-service.yaml"
+                    kubectl apply -f "$K/namespace-1-frontend/frontend-networkpolicy.yaml"
+                    # Ingress (TLS secret created in previous step from secure files)
+                    kubectl apply -f "$K/namespace-2-backend/ingress.yaml"
+                    kubectl apply -f "$K/namespace-1-frontend/ingress.yaml"
+                  displayName: 'Apply K8s manifests (README order: namespaces → data → backend → frontend → ingress)'
+
+  - stage: DeployK8sHelm
+    displayName: 'Deploy to Kubernetes (Helm chart, local cluster)'
+    dependsOn: Build
+    condition: and(succeeded(), eq('${{ parameters.deployTarget }}', 'k8s-helm'))
+    variables:
+      effectiveTag: $[ stageDependencies.Build.SetTag.outputs['setEffectiveTag.effectiveTag'] ]
+    jobs:
+      - deployment: DeployToK8sHelm
+        displayName: 'Deploy with Helm to local K8s cluster'
+        environment: 'k8s'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Get repo (chart source)'
+                  inputs:
+                    buildType: 'current'
+                    artifactName: 'image-tag'
+                    targetPath: '$(Pipeline.Workspace)/src'
+
+                - task: HelmInstaller@1
+                  displayName: 'Install Helm'
+                  inputs:
+                    helmVersionToInstall: 'latest'
+
+                - task: DownloadSecureFile@1
+                  name: download_tls_crt_helm
+                  displayName: 'Download TLS certificate'
+                  inputs:
+                    secureFile: 'tls.crt'
+
+                - task: DownloadSecureFile@1
+                  name: download_tls_key_helm
+                  displayName: 'Download TLS key'
+                  inputs:
+                    secureFile: 'tls.key'
+
+                - bash: |
+                    set -e
+                    kubectl create secret tls ingress-tls \
+                      --cert="$(download_tls_crt_helm.secureFilePath)" \
+                      --key="$(download_tls_key_helm.secureFilePath)" \
+                      -n frontend --dry-run=client -o yaml | kubectl apply -f - || true
+                    kubectl create secret tls ingress-tls \
+                      --cert="$(download_tls_crt_helm.secureFilePath)" \
+                      --key="$(download_tls_key_helm.secureFilePath)" \
+                      -n backend --dry-run=client -o yaml | kubectl apply -f - || true
+                  displayName: 'Create TLS secret (ingress-tls) in frontend and backend'
+
+                - bash: |
+                    set -e
+                    CHART_PATH="$(Pipeline.Workspace)/src/helm/ashour-chat"
+                    echo "Deploying Helm chart from $CHART_PATH"
+                    echo "Image prefix: $(DOCKERHUB_IMAGE_PREFIX), Tag: $(effectiveTag)"
+                    helm upgrade --install ashour-chat "$CHART_PATH" \
+                      -n frontend --create-namespace \
+                      --set global.imageRegistry="$(DOCKERHUB_IMAGE_PREFIX)" \
+                      --set frontend.image.tag="$(effectiveTag)" \
+                      --set reactions.image.tag="$(effectiveTag)" \
+                      --set mood.image.tag="$(effectiveTag)" \
+                      --set storageClass.enabled=false \
+                      --wait --timeout 5m
+                  displayName: 'Helm upgrade --install ashour-chat (local cluster)'
