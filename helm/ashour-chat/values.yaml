@@ -1,56 +1,46 @@
-# Default values for ashour-chat (frontend, reactions, mood, Redis, MySQL).
-# Override with -f custom-values.yaml or --set key=value.
+# Ashour Chat - simple defaults. Override with -f custom.yaml or --set key=value.
+# Install: helm install ashour-chat . -n ashour-chat --create-namespace
 
-# Image registry prefix (e.g. ashour11/ashour-chat); images become <prefix>-frontend:<tag>, <prefix>-reactions:<tag>, <prefix>-mood:<tag>)
-global:
-  imageRegistry: ""  # e.g. ashour11/ashour-chat
-  imagePullPolicy: IfNotPresent
+# App images (full name:tag). Override from CI: --set frontendImage=user/ashour-chat-frontend:2 etc.
+frontendImage: "frontend:latest"
+reactionsImage: "reactions:latest"
+moodImage: "mood:latest"
 
-# Namespaces (created by the chart)
-namespaces:
-  frontend: frontend
-  backend: backend
-  data: data
-
-# Ingress
+# Ingress (one host, one Ingress resource)
 ingress:
   enabled: true
   className: nginx
   host: buzzboard.local
   tls:
     enabled: true
-    secretName: ingress-tls  # Create separately: kubectl create secret tls ingress-tls --cert=tls.crt --key=tls.key -n frontend -n backend
+    secretName: ingress-tls   # Create with: kubectl create secret tls ingress-tls --cert=tls.crt --key=tls.key -n <release-namespace>
+
+# Optional: enable NetworkPolicies (can block traffic if labels differ)
+networkPolicies:
+  enabled: false
 
 # --- Frontend ---
 frontend:
   replicaCount: 1
-  image:
-    repository: frontend
-    tag: latest
-    pullPolicy: IfNotPresent
   service:
     port: 80
   config:
-    REACTIONS_SVC_URL: "/api/reactions"
-    MOOD_SVC_URL: "/api/mood"
+    REACTIONS_SVC_URL: "http://reactions-svc:8080"
+    MOOD_SVC_URL: "http://mood-svc:8080"
 
 # --- Backend: reactions ---
 reactions:
   replicaCount: 1
-  image:
-    repository: reactions
-    tag: latest
-    pullPolicy: IfNotPresent
   service:
     port: 8080
   config:
-    REDIS_HOST: "redis-svc.data.svc.cluster.local"
+    REDIS_HOST: "redis-svc"
     REDIS_PORT: "6379"
-    MYSQL_HOST: "mysql-svc.data.svc.cluster.local"
+    MYSQL_HOST: "mysql-svc"
     MYSQL_DATABASE: "buzzboard"
-    MOOD_SVC_URL: "http://mood-svc.backend.svc.cluster.local:8080"
+    MOOD_SVC_URL: "http://mood-svc:8080"
   hpa:
-    enabled: true
+    enabled: false
     minReplicas: 1
     maxReplicas: 5
     targetCPUUtilization: 70
@@ -65,18 +55,14 @@ reactions:
 # --- Backend: mood ---
 mood:
   replicaCount: 1
-  image:
-    repository: mood
-    tag: latest
-    pullPolicy: IfNotPresent
   service:
     port: 8080
   config:
-    REDIS_HOST: "redis-svc.data.svc.cluster.local"
+    REDIS_HOST: "redis-svc"
     REDIS_PORT: "6379"
-    MYSQL_HOST: "mysql-svc.data.svc.cluster.local"
+    MYSQL_HOST: "mysql-svc"
     MYSQL_DATABASE: "buzzboard"
-    REACTIONS_SVC_URL: "http://reactions-svc.backend.svc.cluster.local:8080"
+    REACTIONS_SVC_URL: "http://reactions-svc:8080"
   resources:
     requests:
       memory: "64Mi"
@@ -88,10 +74,7 @@ mood:
 # --- Data: Redis ---
 redis:
   replicaCount: 1
-  image:
-    repository: redis
-    tag: "7-alpine"
-    pullPolicy: IfNotPresent
+  image: "redis:7-alpine"
   config:
     maxmemory: "64mb"
     maxmemory-policy: "allkeys-lru"
@@ -106,13 +89,11 @@ redis:
 # --- Data: MySQL ---
 mysql:
   replicaCount: 1
-  image:
-    repository: mysql
-    tag: "8.0"
-    pullPolicy: IfNotPresent
+  image: "mysql:8.0"
   database: buzzboard
-  storageClass: standard-retain
   size: 2Gi
+  # storageClassName: "" uses cluster default (works on minikube, k3d, kind)
+  storageClassName: ""
   resources:
     requests:
       memory: "256Mi"
@@ -121,15 +102,29 @@ mysql:
       memory: "512Mi"
       cpu: "500m"
 
-# --- StorageClass (data layer PVCs) ---
+# Optional: create a StorageClass (e.g. for local clusters). Usually leave false.
 storageClass:
-  enabled: true
+  enabled: false
   name: standard-retain
-  provisioner: rancher.io/local-path  # k3d/kind; use cluster default for GKE/minikube
+  provisioner: rancher.io/local-path
   reclaimPolicy: Retain
   volumeBindingMode: WaitForFirstConsumer
 
-# --- Secrets (override in production; use --set-file or sealed-secrets) ---
+# Vault + External Secrets: when enabled, Secrets are synced from Vault instead of values.
+# Requires Vault and External Secrets Operator installed; run bootstrap and create SecretStore (or use chart-created one).
+vault:
+  enabled: false
+  # KV v2 path under mount "secret"; key name for ExternalSecret remoteRef (e.g. ashour-chat).
+  path: "secret/ashour-chat"
+  kvKey: "ashour-chat"
+  address: "http://vault.vault.svc:8200"
+  auth:
+    role: "ashour-chat-eso"
+    # Service account in release namespace used by ESO to authenticate to Vault (must match Vault role binding).
+    serviceAccount: "default"
+  secretStoreName: "vault-ashour-chat"
+
+# Secrets (override in production; ignored when vault.enabled is true)
 secrets:
   redisPassword: "buzzboard-redis-secret"
   mysqlRootPassword: "buzzboard-mysql-root"

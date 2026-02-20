@@ -311,10 +311,9 @@ stages:
                     echo "Image prefix: $(DOCKERHUB_IMAGE_PREFIX), Tag: $(effectiveTag)"
                     helm upgrade --install ashour-chat "$CHART_PATH" \
                       -n frontend --create-namespace \
-                      --set global.imageRegistry="$(DOCKERHUB_IMAGE_PREFIX)" \
-                      --set frontend.image.tag="$(effectiveTag)" \
-                      --set reactions.image.tag="$(effectiveTag)" \
-                      --set mood.image.tag="$(effectiveTag)" \
+                      --set frontendImage="$(DOCKERHUB_IMAGE_PREFIX)-frontend:$(effectiveTag)" \
+                      --set reactionsImage="$(DOCKERHUB_IMAGE_PREFIX)-reactions:$(effectiveTag)" \
+                      --set moodImage="$(DOCKERHUB_IMAGE_PREFIX)-mood:$(effectiveTag)" \
                       --set storageClass.enabled=false \
                       --wait --timeout 5m
                   displayName: 'Helm upgrade --install ashour-chat (local cluster)'

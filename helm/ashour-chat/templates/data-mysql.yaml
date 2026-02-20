@@ -2,26 +2,28 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mysql-config
-  namespace: {{ .Values.namespaces.data }}
+  namespace: {{ .Release.Namespace }}
 data:
   MYSQL_DATABASE: {{ .Values.mysql.database | quote }}
 ---
+{{- if not .Values.vault.enabled }}
 apiVersion: v1
 kind: Secret
 metadata:
   name: mysql-secret
-  namespace: {{ .Values.namespaces.data }}
+  namespace: {{ .Release.Namespace }}
 type: Opaque
 stringData:
   MYSQL_ROOT_PASSWORD: {{ .Values.secrets.mysqlRootPassword | quote }}
   MYSQL_USER: {{ .Values.secrets.mysqlUser | quote }}
   MYSQL_PASSWORD: {{ .Values.secrets.mysqlPassword | quote }}
 ---
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: mysql
-  namespace: {{ .Values.namespaces.data }}
+  namespace: {{ .Release.Namespace }}
 spec:
   serviceName: mysql-svc
   replicas: {{ .Values.mysql.replicaCount }}
@@ -35,7 +37,7 @@ spec:
     spec:
       containers:
         - name: mysql
-          image: {{ .Values.mysql.image.repository }}:{{ .Values.mysql.image.tag }}
+          image: {{ .Values.mysql.image }}
           ports:
             - containerPort: 3306
               name: mysql
@@ -69,7 +71,9 @@ spec:
     - metadata:
         name: data
       spec:
-        storageClassName: {{ .Values.storageClass.name }}
+        {{- if .Values.mysql.storageClassName }}
+        storageClassName: {{ .Values.mysql.storageClassName | quote }}
+        {{- end }}
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
@@ -79,7 +83,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mysql-svc
-  namespace: {{ .Values.namespaces.data }}
+  namespace: {{ .Release.Namespace }}
 spec:
   clusterIP: None
   selector:
@@ -89,11 +93,12 @@ spec:
       targetPort: 3306
       name: mysql
 ---
+{{- if .Values.networkPolicies.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: mysql-networkpolicy
-  namespace: {{ .Values.namespaces.data }}
+  namespace: {{ .Release.Namespace }}
 spec:
   podSelector:
     matchLabels:
@@ -104,7 +109,8 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              name: {{ .Values.namespaces.backend }}
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
       ports:
         - protocol: TCP
           port: 3306
+{{- end }}

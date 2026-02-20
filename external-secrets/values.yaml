@@ -1,0 +1,6 @@
+# External Secrets Operator - minimal values for use with Vault.
+# Install: helm repo add external-secrets https://charts.external-secrets.io
+#         helm install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace -f external-secrets/values.yaml
+# The ashour-chat Helm chart can create a SecretStore in the release namespace when vault.enabled=true.
+
+installCRDs: true

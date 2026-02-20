@@ -1,65 +1,86 @@
 # ashour-chat Helm Chart
 
-Deploys the Ashour Chat 3-tier app: **frontend** (nginx), **reactions** and **mood** (backend), **Redis** and **MySQL** (data layer), with Ingress and NetworkPolicies.
+Deploys the Ashour Chat app in **one namespace**: frontend, reactions, mood, Redis, and MySQL, with a single Ingress.
 
 ## Prerequisites
 
-- Kubernetes cluster with an Ingress controller (e.g. NGINX)
-- `kubectl` and `helm` 3.x
-- TLS secret `ingress-tls` in `frontend` and `backend` namespaces (create manually or via pipeline secure files)
+- Kubernetes cluster (minikube, k3d, kind, or any cluster)
+- Ingress controller (e.g. NGINX Ingress)
+- `kubectl` and Helm 3.x
 
-## Install
+For HTTPS: create a TLS secret in the same namespace where you install the chart (see below).
+
+## Install (quick start)
+
+From the chart directory:
 
 ```bash
-# From repo root
 cd helm/ashour-chat
 
-# Install with default values (images: frontend:latest, reactions:latest, mood:latest)
-helm install ashour-chat . -n frontend --create-namespace
-
-# Or use a release name and custom values (e.g. image prefix and tag from CI)
-helm install ashour-chat . -f values.yaml --set global.imageRegistry=ashour11/ashour-chat --set frontend.image.tag=20260208.5 --set reactions.image.tag=20260208.5 --set mood.image.tag=20260208.5 -n frontend --create-namespace
+# Install into namespace ashour-chat (all resources go there)
+helm install ashour-chat . -n ashour-chat --create-namespace
 ```
 
-The chart creates namespaces `frontend`, `backend`, and `data` and deploys all resources into them. The release is installed in the `frontend` namespace by convention; resources are created in all three namespaces.
+Use your own images (full name:tag):
+
+```bash
+helm install ashour-chat . -n ashour-chat --create-namespace \
+  --set frontendImage=ashour11/ashour-chat-frontend:2 \
+  --set reactionsImage=ashour11/ashour-chat-reactions:2 \
+  --set moodImage=ashour11/ashour-chat-mood:2
+```
+
+## Optional: TLS
+
+If you have `tls.crt` and `tls.key`, create the secret **before** or **after** install (chart expects secret name `ingress-tls`):
+
+```bash
+kubectl create secret tls ingress-tls --cert=tls.crt --key=tls.key -n ashour-chat
+```
+
+If you don’t create it, set `ingress.tls.enabled: false` or ignore TLS until you need it.
 
 ## Upgrade
 
 ```bash
-helm upgrade ashour-chat . -f values.yaml --set frontend.image.tag=<new-tag> --set reactions.image.tag=<new-tag> --set mood.image.tag=<new-tag> -n frontend
+helm upgrade ashour-chat . -n ashour-chat --set frontendImage=... --set reactionsImage=... --set moodImage=...
 ```
 
 ## Uninstall
 
 ```bash
-helm uninstall ashour-chat -n frontend
-# Namespaces and PVCs may remain; delete if desired:
-# kubectl delete namespace frontend backend data --ignore-not-found --timeout=120s
+helm uninstall ashour-chat -n ashour-chat
+# Optionally remove the namespace and PVCs:
+# kubectl delete namespace ashour-chat
+# kubectl delete pvc -n ashour-chat -l app=mysql   # if you want to wipe MySQL data
 ```
 
-## Values
+## Main values
 
 | Key | Description | Default |
-|-----|-------------|---------|
-| `global.imageRegistry` | Image prefix (e.g. `ashour11/ashour-chat`). Images become `<prefix>-frontend:<tag>`, etc. | `""` |
-| `ingress.enabled` | Create Ingress resources | `true` |
-| `ingress.host` | Hostname for Ingress | `buzzboard.local` |
-| `ingress.tls.secretName` | TLS secret name in frontend/backend | `ingress-tls` |
-| `frontend.replicaCount` | Frontend replicas | `1` |
-| `frontend.image.repository` / `tag` | Image (ignored if `global.imageRegistry` set) | `frontend:latest` |
-| `reactions.replicaCount` | Reactions API replicas | `1` |
-| `reactions.hpa.enabled` | Enable HPA for reactions | `true` |
-| `mood.replicaCount` | Mood API replicas | `1` |
-| `redis.replicaCount` | Redis replicas | `1` |
-| `mysql.replicaCount` | MySQL replicas | `1` |
-| `mysql.size` | MySQL PVC size | `2Gi` |
-| `storageClass.name` | StorageClass for MySQL PVC | `standard-retain` |
-| `storageClass.provisioner` | Cluster provisioner (e.g. `rancher.io/local-path` for k3d) | `rancher.io/local-path` |
-| `secrets.*` | Redis/MySQL/JWT secrets (override in prod) | See `values.yaml` |
+|-----|-------------|--------|
+| `frontendImage` | Full frontend image (name:tag) | `frontend:latest` |
+| `reactionsImage` | Full reactions image (name:tag) | `reactions:latest` |
+| `moodImage` | Full mood image (name:tag) | `mood:latest` |
+| `ingress.enabled` | Create Ingress | `true` |
+| `ingress.host` | Hostname | `buzzboard.local` |
+| `ingress.tls.enabled` | Use TLS (requires secret `ingress-tls`) | `true` |
+| `networkPolicies.enabled` | Create NetworkPolicies (advanced) | `false` |
+| `storageClass.enabled` | Create a custom StorageClass (for local clusters) | `false` |
+| `reactions.hpa.enabled` | Enable HPA for reactions | `false` |
 
-## Integration with pipeline
+Full list: see `values.yaml`.
 
-To deploy from the Azure pipeline using the chart instead of raw manifests:
+## Pipeline (k8s-helm)
 
-1. Package the chart: `helm package helm/ashour-chat`
-2. In the deploy job, run `helm upgrade --install ashour-chat ./ashour-chat-0.1.0.tgz ...` with `--set global.imageRegistry=$(DOCKERHUB_IMAGE_PREFIX)` and `--set frontend.image.tag=$(effectiveTag)` (and same for reactions/mood), or use a values file generated from pipeline variables.
+The Azure pipeline runs:
+
+```bash
+helm upgrade --install ashour-chat <chart-path> -n frontend --create-namespace \
+  --set frontendImage=$(DOCKERHUB_IMAGE_PREFIX)-frontend:$(effectiveTag) \
+  --set reactionsImage=$(DOCKERHUB_IMAGE_PREFIX)-reactions:$(effectiveTag) \
+  --set moodImage=$(DOCKERHUB_IMAGE_PREFIX)-mood:$(effectiveTag) \
+  --set storageClass.enabled=false
+```
+
+Use the same namespace in pipeline and docs (e.g. `frontend` or `ashour-chat`) and create the TLS secret there if you use TLS.

@@ -1,10 +1,13 @@
 {{- if .Values.ingress.enabled }}
-# Frontend Ingress (path /)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: buzzboard-ingress
-  namespace: {{ .Values.namespaces.frontend }}
+  name: ashour-chat-ingress
+  namespace: {{ .Release.Namespace }}
+  {{- if .Values.ingress.tls.enabled }}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls.enabled }}
@@ -24,36 +27,15 @@ spec:
                 name: frontend-svc
                 port:
                   number: {{ .Values.frontend.service.port }}
----
-# Backend Ingress (API paths)
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: buzzboard-ingress-api
-  namespace: {{ .Values.namespaces.backend }}
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
-spec:
-  ingressClassName: {{ .Values.ingress.className }}
-  {{- if .Values.ingress.tls.enabled }}
-  tls:
-    - hosts:
-        - {{ .Values.ingress.host }}
-      secretName: {{ .Values.ingress.tls.secretName }}
-  {{- end }}
-  rules:
-    - host: {{ .Values.ingress.host }}
-      http:
-        paths:
-          - path: /api/reactions(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /api/reactions
+            pathType: Prefix
             backend:
               service:
                 name: reactions-svc
                 port:
                   number: {{ .Values.reactions.service.port }}
-          - path: /api/mood(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /api/mood
+            pathType: Prefix
             backend:
               service:
                 name: mood-svc

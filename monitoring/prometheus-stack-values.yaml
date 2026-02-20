@@ -1,0 +1,39 @@
+# Values for kube-prometheus-stack (Prometheus + Grafana + node-exporter).
+# Install: helm upgrade --install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace -f monitoring/prometheus-stack-values.yaml
+# Requires: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts && helm repo update
+
+# Optional: disable Alertmanager to reduce resource usage (metrics + dashboards only)
+alertmanager:
+  enabled: false
+
+# Grafana: set admin password, root URL for Ingress, and enable Ingress
+grafana:
+  adminPassword: "admin"
+  # Required when behind Ingress so Grafana does not redirect to wrong host (avoids 503)
+  grafana.ini:
+    server:
+      root_url: "https://grafana.buzzboard.local"
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - grafana.buzzboard.local
+    tls:
+      - secretName: ingress-tls
+        hosts:
+          - grafana.buzzboard.local
+
+# Prometheus: enable Ingress for browser access
+prometheus:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - prometheus.buzzboard.local
+    tls:
+      - secretName: ingress-tls
+        hosts:
+          - prometheus.buzzboard.local
+
+# TLS secret must exist in monitoring namespace, e.g.:
+# kubectl create secret tls ingress-tls --cert=tls.crt --key=tls.key -n monitoring

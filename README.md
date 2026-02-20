@@ -347,6 +347,200 @@ Or use a load tool (e.g. `hey`: `hey -z 60s -c 20 http://localhost:8080/reaction
 
 **4. Observe:** After a minute or two, `kubectl get hpa -n backend` should show increased CPU and the HPA raising desired replicas; `kubectl get pods -n backend` should show more `reactions-*` pods. When you stop the load, the HPA will scale back down toward 1.
 
+## Monitoring (Prometheus + Grafana)
+
+Prometheus and Grafana can be installed in the cluster to monitor running pods (including ashour-chat). The stack scrapes pod and container metrics (CPU, memory, network) via the kubelet.
+
+### Install the stack
+
+From the project root:
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm upgrade --install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace -f monitoring/prometheus-stack-values.yaml
+```
+
+This installs Prometheus, Grafana, and node-exporter in the `monitoring` namespace. Alertmanager is disabled in the provided values to reduce resource usage.
+
+For Ingress (optional), the values file configures:
+- **Prometheus:** `https://prometheus.buzzboard.local`
+- **Grafana:** `https://grafana.buzzboard.local`
+
+Create the TLS secret in `monitoring` so the Ingress can serve HTTPS:
+
+```bash
+kubectl create secret tls ingress-tls --cert=tls.crt --key=tls.key -n monitoring
+```
+
+Add the monitoring hostnames to your hosts file (same IP as `buzzboard.local`). For example, if `buzzboard.local` is `192.168.139.2`:
+
+- **macOS/Linux:** `sudo nano /etc/hosts` and add (or append to the existing buzzboard.local line):
+  ```
+  192.168.139.2  prometheus.buzzboard.local grafana.buzzboard.local
+  ```
+- Or add a separate line: `INGRESS_IP   prometheus.buzzboard.local` and `INGRESS_IP   grafana.buzzboard.local`.
+
+### Access Prometheus and confirm pod scraping
+
+**Port-forward (no Ingress):**
+
+```bash
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
+```
+
+Open **http://localhost:9090/targets**. You should see targets for **kubernetes-nodes**, **kubernetes-pods** / **kubernetes-cadvisor**, etc. Pods in `ashour-chat` (and other namespaces) are discovered and scraped by default.
+
+**Example queries** in the Prometheus query UI (http://localhost:9090/graph) for ashour-chat pods:
+
+- `container_cpu_usage_seconds_total{namespace="ashour-chat"}`
+- `container_memory_working_set_bytes{namespace="ashour-chat"}`
+
+If you use Ingress, open **https://prometheus.buzzboard.local** instead.
+
+### Access Grafana
+
+**Port-forward:**
+
+```bash
+kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
+```
+
+Open **http://localhost:3000**. Default user is `admin`; get the password:
+
+```bash
+kubectl get secret -n monitoring prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 -d ; echo
+```
+
+Grafana comes with preloaded dashboards. Use **Dashboards → Browse** and open e.g. **Kubernetes / Compute Resources / Pods** to see pod CPU/memory by namespace (including `ashour-chat`).
+
+If you use Ingress, open **https://grafana.buzzboard.local**. If you get **503 Service Unavailable**, Grafana may be redirecting to the wrong URL; the values file sets `root_url` to fix this. Re-apply the stack: `helm upgrade prometheus prometheus-community/kube-prometheus-stack -n monitoring -f monitoring/prometheus-stack-values.yaml`, wait for the Grafana pod to restart, then try again. As a workaround, use port-forward above.
+
+### No data in Grafana namespace/pod dashboards (CPU/Memory utilisation)
+
+The **Kubernetes / Compute Resources / Namespace (Pods)** dashboard shows **CPU Quota** (requests/limits from the API) but **No data** for CPU/Memory **utilisation** because those come from **cAdvisor** (kubelet), not from a separate "pod exporter". The stack is already set up to scrape the kubelet:
+
+- **ServiceMonitor** `prometheus-kube-prometheus-kubelet` in `monitoring` scrapes `/metrics/cadvisor` from the kubelet (in `kube-system`).
+- **Endpoints** `prometheus-kube-prometheus-kubelet` in `kube-system` point at the node’s kubelet (e.g. `https-metrics` port 10250).
+
+**Check in Prometheus:**
+
+1. Port-forward: `kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090`
+2. Open **http://localhost:9090/targets** and find the job for the kubelet (e.g. **kubelet** or **kubernetes-nodes-cadvisor**). If it is **DOWN**, Prometheus is not getting container metrics (common on **K3s/OrbStack** where the kubelet may not expose cAdvisor the same way; see the README note on "Metrics not available" for metrics-server).
+3. If the target is **UP**, open **http://localhost:9090/graph** and run:  
+   `container_memory_working_set_bytes{namespace="backend", container!=""}`  
+   If that returns data, the dashboard may be using different labels or job names; use **Explore** in Grafana with that query.
+
+**Summary:** There is no separate "pod exporter"; pod usage comes from the kubelet. If the kubelet/cAdvisor target is DOWN, fix that scrape (or accept the platform limitation); if it is UP, use the query above in Grafana or adjust the dashboard.
+
+## Secrets with Vault
+
+You can use **HashiCorp Vault** as the source of truth for app secrets (Redis, MySQL, JWT). The **External Secrets Operator (ESO)** syncs them into the same Kubernetes Secrets the app already uses, so no pod or app code changes are required.
+
+**Prerequisites:** A running Kubernetes cluster, `kubectl`, `helm`, and (for bootstrap) the Vault CLI.
+
+### Install order
+
+1. **Install Vault** (Helm) in the `vault` namespace.
+2. **Unseal** Vault (if not using dev mode) and run **bootstrap** (KV v2, Kubernetes auth, policy, role, seed secrets).
+3. **Install External Secrets Operator** in the `external-secrets` namespace.
+4. **Install or upgrade** the ashour-chat chart with `vault.enabled=true`.
+
+### 1. Install Vault
+
+From the project root:
+
+```bash
+kubectl create namespace vault
+helm repo add hashicorp https://helm.releases.hashicorp.com
+helm repo update
+helm install vault hashicorp/vault -n vault -f vault/helm-values.yaml
+```
+
+Wait for the Vault pod to be ready: `kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=vault -n vault --timeout=120s`.
+
+**Standalone (default)**: Vault starts sealed. Initialize and unseal (see [Vault docs](https://developer.hashicorp.com/vault/docs/concepts/seal#unseal)):
+
+```bash
+kubectl exec -n vault vault-0 -- vault operator init -key-shares=1 -key-threshold=1 -format=json > vault-keys.json
+# Save the unseal key and root token from vault-keys.json, then:
+kubectl exec -n vault vault-0 -- vault operator unseal <UNSEAL_KEY>
+export VAULT_TOKEN=<ROOT_TOKEN>
+```
+
+**Dev mode (optional, for try-out)**: In `vault/helm-values.yaml`, set `server.dev.enabled: true` and disable `server.standalone`. Dev mode is unsealed by default and has KV v2 at `secret/`; data is in-memory and lost on restart. Get the root token from the Vault pod logs.
+
+### 2. Bootstrap Vault (KV, Kubernetes auth, policy, role, seed)
+
+Ensure Vault is reachable and you have a root (or sufficient) token. From your machine with the Vault CLI:
+
+```bash
+kubectl port-forward -n vault svc/vault 8200:8200
+```
+
+In another terminal:
+
+```bash
+export VAULT_ADDR=http://127.0.0.1:8200
+export VAULT_TOKEN=<your-root-token>
+
+# Optional: if running from outside the cluster, you may need to pass Kubernetes CA and reviewer JWT for auth:
+# export VAULT_KUBE_CA_CERT="$(kubectl get secret -n vault vault-server-tls -o jsonpath='{.data.ca\.crt}' 2>/dev/null | base64 -d)"  # or cluster CA
+# export VAULT_KUBE_REVIEWER_JWT="$(kubectl create token -n vault default --duration=86400)"
+
+chmod +x vault/bootstrap.sh
+./vault/bootstrap.sh
+```
+
+The script enables KV v2 at `secret`, configures Kubernetes auth, creates policy `ashour-chat-read` and role `ashour-chat-eso` (bound to service account `default` in namespace `ashour-chat`), and seeds `secret/ashour-chat` with keys: `redisPassword`, `mysqlRootPassword`, `mysqlUser`, `mysqlPassword`, `jwtSecret`. Override values with env vars `VAULT_secret_redisPassword`, etc., or edit the script.
+
+### 3. Install External Secrets Operator
+
+```bash
+kubectl create namespace external-secrets
+helm repo add external-secrets https://charts.external-secrets.io
+helm repo update
+helm install external-secrets external-secrets/external-secrets -n external-secrets -f external-secrets/values.yaml
+```
+
+### 4. Install ashour-chat with Vault-backed secrets
+
+Install or upgrade the chart with Vault enabled (and optional overrides):
+
+```bash
+helm upgrade --install ashour-chat helm/ashour-chat -n ashour-chat --create-namespace \
+  --set vault.enabled=true \
+  --set vault.address=http://vault.vault.svc:8200 \
+  --set vault.auth.role=ashour-chat-eso \
+  --set vault.auth.serviceAccount=default
+```
+
+The chart creates a **SecretStore** in the release namespace and four **ExternalSecrets** that sync from Vault into `reactions-secret`, `mood-secret`, `redis-secret`, and `mysql-secret` (same names and keys the pods use).
+
+### Verify
+
+- List ExternalSecrets: `kubectl get externalsecrets -n ashour-chat`
+- Check sync status: `kubectl describe externalsecret reactions-secret -n ashour-chat`
+- Confirm Secrets exist: `kubectl get secrets -n ashour-chat reactions-secret mood-secret redis-secret mysql-secret`
+- Ensure pods start and can reach Redis/MySQL (same as without Vault).
+
+### Vault path and keys
+
+Secrets are read from path **`secret/ashour-chat`** (KV v2). Required keys:
+
+| Key                | Used by              |
+|--------------------|----------------------|
+| `redisPassword`    | reactions, mood, redis |
+| `mysqlRootPassword`| mysql                |
+| `mysqlUser`        | reactions, mood, mysql |
+| `mysqlPassword`    | reactions, mood, mysql |
+| `jwtSecret`        | reactions, mood      |
+
+Example (one-time seed):  
+`vault kv put secret/ashour-chat redisPassword=xxx mysqlRootPassword=xxx mysqlUser=buzzboard mysqlPassword=xxx jwtSecret=xxx`
+
+**Production:** Use proper Vault storage (e.g. Raft) and unseal process; see [HashiCorp Vault documentation](https://developer.hashicorp.com/vault/docs).
+
 ## Testing PVC retain (MySQL)
 
 To verify data persists across StatefulSet restart:
@@ -366,6 +560,13 @@ k8s/
   namespace-2-backend/
   namespace-3-data/
   ssl/README.md
+monitoring/
+  prometheus-stack-values.yaml   # Helm values for Prometheus + Grafana stack
+vault/
+  helm-values.yaml               # Vault Helm values (standalone / dev)
+  bootstrap.sh                   # KV v2, Kubernetes auth, policy, role, seed secrets
+external-secrets/
+  values.yaml                    # External Secrets Operator Helm values
 docker-compose.yml
 README.md
 ```

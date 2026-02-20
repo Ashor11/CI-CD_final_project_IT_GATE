@@ -1,0 +1,43 @@
+# Vault Helm values for ashour-chat (dev / learning).
+# Install: helm repo add hashicorp https://helm.releases.hashicorp.com
+#         helm install vault hashicorp/vault -n vault --create-namespace -f vault/helm-values.yaml
+#
+# For "works out of the box" (no unseal): set server.dev.enabled: true below.
+# Dev mode is in-memory and not for production; data is lost on restart.
+# For persistence: use standalone + file storage (default) and run unseal + bootstrap.
+
+global:
+  enabled: true
+  tlsDisable: true
+
+# Disable injector/CSI when using External Secrets Operator for this project.
+injector:
+  enabled: false
+
+server:
+  enabled: true
+  # Dev mode: unsealed by default, KV v2 at secret/, in-memory (data lost on restart).
+  # dev:
+  #   enabled: true
+  standalone:
+    enabled: true
+    config: |
+      ui = true
+      listener "tcp" {
+        tls_disable = 1
+        address = "[::]:8200"
+        cluster_address = "[::]:8201"
+      }
+      storage "file" {
+        path = "/vault/data"
+      }
+  service:
+    enabled: true
+  dataStorage:
+    enabled: true
+    size: 1Gi
+  authDelegator:
+    enabled: true
+
+ui:
+  enabled: true
