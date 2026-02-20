@@ -1,7 +1,6 @@
 # Ashour Chat Tutorial — 3-Tier Student Project
 
-[docs/itgate-final-pro.png
-](https://github.com/Ashor11/CI-CD_final_project_IT_GATE/blob/f0fe9766d5deee46a2d2ca2c93ef51730201e66c/docs/itgate-final-pro.png)
+<img width="13120" height="11280" alt="itgate-final-pro" src="https://github.com/user-attachments/assets/41bb0158-8df4-44b6-8c12-d390c084f56a" />
 
 A **multi-service** app (Reaction Wall + Mood of the Day) with **sign-in**: the UI is branded **"Ashour Chat Tutorial"** and uses a single **menu bar** (Sign in | Sign up when logged out; Reaction Wall | Mood | Hello, username | Log out when logged in). Both posting reactions and voting mood **require sign-in**. Built to teach **3-tier architecture**, **Kubernetes**, **Redis** (cache), and **MySQL** (persistence). Backend is **2 microservices** (reactions, mood) that call each other via Kubernetes Services.
 
